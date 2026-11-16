@@ -13,7 +13,7 @@ public final class WhatsAppDatesMedia {
     private static final File BASE = new File(
         "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"
     );
-    private static final String IMAGES = "content://media/external_primary/images/media";
+    private static final File VIDEOS = new File(BASE.getParentFile(), "WhatsApp Video");
 
     public static void main(String[] args) throws Exception {
         Method content = Class.forName("com.android.commands.content.Content")
@@ -52,12 +52,13 @@ public final class WhatsAppDatesMedia {
     private static void execute(Method content, String[] fields) throws Exception {
         String[] command;
         if (fields[0].equals("scan") && fields.length == 2) {
-            File image = new File(decode(fields[1]));
-            if (!BASE.equals(image.getParentFile()) || image.getName().startsWith(".")
-                || !image.isFile() || Files.isSymbolicLink(image.toPath())) {
-                throw new IllegalArgumentException("Invalid visible image");
+            File media = new File(decode(fields[1]));
+            File parent = media.getParentFile();
+            if ((!BASE.equals(parent) && !VIDEOS.equals(parent)) || media.getName().startsWith(".")
+                || !media.isFile() || Files.isSymbolicLink(media.toPath())) {
+                throw new IllegalArgumentException("Invalid visible media");
             }
-            for (File dir = BASE; dir.getParentFile() != null; dir = dir.getParentFile()) {
+            for (File dir = parent; dir.getParentFile() != null; dir = dir.getParentFile()) {
                 File marker = new File(dir, ".nomedia");
                 if (marker.exists() || Files.isSymbolicLink(marker.toPath())) {
                     System.out.println("hidden");
@@ -65,11 +66,21 @@ public final class WhatsAppDatesMedia {
                 }
             }
             command = new String[] {
-                "call", "--uri", "content://media", "--method", "scan_file", "--arg", image.getPath()
+                "call", "--uri", "content://media", "--method", "scan_file", "--arg", media.getPath()
             };
-        } else if (fields[0].equals("query") && fields.length == 3) {
+        } else if (fields[0].equals("query") && fields.length == 4) {
+            String kind = decode(fields[1]);
+            String collection;
+            if (kind.equals("images")) {
+                collection = "images";
+            } else if (kind.equals("videos")) {
+                collection = "video";
+            } else {
+                throw new IllegalArgumentException("Invalid media collection");
+            }
             command = new String[] {
-                "query", "--uri", IMAGES, "--projection", decode(fields[1]), "--where", decode(fields[2])
+                "query", "--uri", "content://media/external_primary/" + collection + "/media",
+                "--projection", decode(fields[2]), "--where", decode(fields[3])
             };
         } else {
             throw new IllegalArgumentException("Invalid command");

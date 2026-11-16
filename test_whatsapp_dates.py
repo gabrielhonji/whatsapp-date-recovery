@@ -34,6 +34,7 @@ class RecoveryTest(unittest.TestCase):
             """)
         self.visible = str(app.BASE / "visible.jpg")
         self.hidden = str(app.BASE / "Private" / "hidden.jpeg")
+        self.video = str(app.VIDEO_BASE / "clip.mp4")
         self.original = 1735689600123456789
         self.files = dict.fromkeys([
             self.visible, self.hidden, str(app.BASE / "dup.jpg"), str(app.BASE / "Sent" / "DUP.JPG"),
@@ -92,12 +93,16 @@ class RecoveryTest(unittest.TestCase):
         results = []
         for kind, *fields in commands:
             if kind == "scan":
-                self.assertEqual(fields, [self.visible])
-                self.scanned.append(self.visible)
+                self.assertIn(fields, ([self.visible], [self.video]))
+                self.scanned.append(fields[0])
                 results.append("Result: Bundle[{android.intent.extra.STREAM=Supplier{VAL_PARCELABLE@64+136}}]")
             else:
-                expected = self.files[self.visible] // app.SECOND
-                results.append(f"Row: 0 _display_name=visible.jpg, date_modified={expected - self.fail_scan}\r\n"
+                media, _, where = fields
+                path = {"images": self.visible, "videos": self.video}[media]
+                filename = Path(path).name
+                self.assertIn(f"'{filename}'", where)
+                expected = self.files[path] // app.SECOND
+                results.append(f"Row: 0 _display_name={filename}, date_modified={expected - self.fail_scan}\r\n"
                                "Row: 1 _display_name=other.jpg, date_modified=0")
         return results
 
@@ -142,6 +147,29 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.cli("--rollback"), 1)
         self.assertEqual(self.files[self.visible], 1705543248123000001)
         self.assertEqual(self.files[self.hidden], self.original)
+
+    def test_video_scope_and_rollback_preserve_photo_changes(self):
+        hidden_video = str(app.VIDEO_BASE / "Private" / "clip-hidden.mov")
+        self.files.update({self.video: self.original, hidden_video: self.original})
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.executemany("INSERT INTO message_media VALUES (1, NULL, ?, ?)", [
+                ("CLIP.MP4", "video/mp4"), ("clip-hidden.mov", "video/quicktime"),
+            ])
+        self.assertEqual(self.cli("--apply", "--media", "images", "--limit", "1"), 0)
+        adjusted = self.files[self.visible]
+        self.assertEqual(self.cli("--apply", "--media", "videos"), 0)
+        self.assertEqual(self.touched, [self.visible, self.video, hidden_video])
+        self.assertEqual(self.files[self.video], adjusted)
+        self.assertEqual(self.files[hidden_video], adjusted)
+        self.assertEqual(self.cli("--rollback", "--media", "videos"), 0)
+        self.assertEqual(self.files[self.visible], adjusted)
+        self.assertEqual(self.files[self.video], self.original)
+        self.assertEqual(self.files[hidden_video], self.original)
+        self.assertEqual(self.scanned, [self.visible, self.video, self.video])
+        self.assertEqual(self.cli("--apply"), 0)
+        self.assertEqual(self.files[self.hidden], adjusted)
+        self.assertEqual(self.files[self.video], adjusted)
+        self.assertEqual(self.files[hidden_video], adjusted)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Restore WhatsApp JPEG modification times using a decrypted message database."""
+"""Restore WhatsApp photo and video dates using a decrypted message database."""
 
 import argparse
 from base64 import b64encode
@@ -18,8 +18,13 @@ from time import monotonic
 from typing import NamedTuple
 
 
-BASE = PurePosixPath("/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images")
-DIRECTORIES = (BASE, BASE / "Private", BASE / "Sent")
+MEDIA_ROOT = PurePosixPath("/sdcard/Android/media/com.whatsapp/WhatsApp/Media")
+BASE = MEDIA_ROOT / "WhatsApp Images"
+VIDEO_BASE = MEDIA_ROOT / "WhatsApp Video"
+MEDIA_TYPES = {
+    "images": (BASE, (".jpg", ".jpeg"), "image/%"),
+    "videos": (VIDEO_BASE, (".mp4", ".mov"), "video/%"),
+}
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 SECOND = 1_000_000_000
 STAT_FORMAT = "%d %i %s %f %y"
@@ -114,39 +119,43 @@ def parse_stat(line):
     return FileInfo(f"{device}:{inode}:{size}", seconds * SECOND + int((fraction or "").ljust(9, "0")))
 
 
-def jpeg_name(value):
+def media_name(value, extensions):
     if isinstance(value, str):
         name = value.replace("\\", "/").rsplit("/", 1)[-1]
-        if name.lower().endswith((".jpg", ".jpeg")):
+        if name.lower().endswith(extensions):
             return name.casefold()
     return None
 
 
-def allowed_path(path):
+def path_media(path):
     candidate = PurePosixPath(path)
-    return (
-        str(candidate) == path
-        and candidate.parent in DIRECTORIES
-        and "\\" not in candidate.name
-        and candidate.name.lower().endswith((".jpg", ".jpeg"))
-    )
+    if str(candidate) != path or "\\" in candidate.name:
+        return None
+    for kind, (root, extensions, _) in MEDIA_TYPES.items():
+        if candidate.parent in (root, root / "Private", root / "Sent") and candidate.name.lower().endswith(extensions):
+            return kind
+    return None
 
 
 def scan_candidate(path):
     file = PurePosixPath(path)
-    return file.parent == BASE and not file.name.startswith(".")
+    return file.parent in (BASE, VIDEO_BASE) and not file.name.startswith(".")
 
 
-def read_dates(database):
+def read_dates(database, media="all"):
     dates = defaultdict(set)
     query = """
-        SELECT mm.file_path, mm.media_name, m.timestamp
+        SELECT mm.file_path, mm.media_name, m.timestamp, mm.mime_type
         FROM message_media mm JOIN message m ON m._id = mm.message_row_id
-        WHERE mm.mime_type LIKE 'image/%'
+        WHERE mm.mime_type LIKE ? OR mm.mime_type LIKE ?
     """
     with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        for path, name, milliseconds in connection.execute(query):
-            filename = jpeg_name(path) or jpeg_name(name)
+        filters = tuple(mime if media in ("all", kind) else None
+                        for kind, (_, _, mime) in MEDIA_TYPES.items())
+        for path, name, milliseconds, mime in connection.execute(query, filters):
+            kind = "videos" if mime.lower().startswith("video/") else "images"
+            extensions = MEDIA_TYPES[kind][1]
+            filename = media_name(path, extensions) or media_name(name, extensions)
             if filename:
                 valid = isinstance(milliseconds, int) and 0 < milliseconds <= (2**63 - 1) // 1_000_000
                 dates[filename].add(milliseconds * 1_000_000 if valid else None)
@@ -224,7 +233,7 @@ class Adb:
         try:
             self.run("-s", self.serial, "push", str(MEDIA_DEX), self.media_dex)
             self.shell("chmod", "444", self.media_dex)
-            check, = self.media_batch([("query", "_id", "_id = -1")])
+            check, = self.media_batch([("query", "images", "_id", "_id = -1")])
             if not isinstance(check, str) or check.strip() != "No result found.":
                 raise RuntimeError(f"O modo rápido de reindexação não iniciou: {check}")
             yield
@@ -244,17 +253,19 @@ class Adb:
         output = self.run("-s", self.serial, "shell", "-T", command, data="".join(lines).encode("ascii"))
         return self.parse_batch(output, len(commands))
 
-    def files(self):
+    def files(self, media="all"):
         def find(directory):
             return shlex.join(("toybox", "find", str(directory), "-maxdepth", "1", "-type", "f", "-print0"))
 
-        commands = [find(BASE)]
-        for directory in DIRECTORIES[1:]:
+        roots = [root for kind, (root, _, _) in MEDIA_TYPES.items() if media in ("all", kind)]
+        available = " || ".join(f"[ -d {shlex.quote(str(root))} ]" for root in roots)
+        commands = [f"if ! ( {available} ); then echo 'Pastas de mídia do WhatsApp não encontradas.' >&2; exit 1; fi"]
+        for directory in (directory for root in roots for directory in (root, root / "Private", root / "Sent")):
             quoted = shlex.quote(str(directory))
             commands.append(f"if [ -d {quoted} ]; then {find(directory)}; fi")
         output = self.script("set -e; " + "; ".join(commands))
-        paths = {path for path in output.split("\0") if allowed_path(path)}
-        return sorted(paths, key=lambda path: (PurePosixPath(path).parent != BASE, path.casefold(), path))
+        paths = {path for path in output.split("\0") if (kind := path_media(path)) and media in ("all", kind)}
+        return sorted(paths, key=lambda path: (not scan_candidate(path), path.casefold(), path))
 
     def stat_many(self, paths):
         lines = self.shell("toybox", "stat", "-c", STAT_FORMAT, *paths).splitlines()
@@ -289,12 +300,20 @@ class Adb:
         raise RuntimeError(f"MediaStore não confirmou a indexação: {output!r}")
 
     def scan_batch(self, files):
-        directory = BASE.relative_to("/sdcard")
+        outcomes = {}
+        for kind, (root, _, _) in MEDIA_TYPES.items():
+            album = [(path, target) for path, target in files if PurePosixPath(path).parent == root]
+            if album:
+                outcomes.update(zip((path for path, _ in album), self.scan_album(album, kind, root), strict=True))
+        return [outcomes[path] for path, _ in files]
+
+    def scan_album(self, files, kind, root):
+        directory = root.relative_to("/sdcard")
 
         def query(names, projection):
             literals = ", ".join("'" + name.replace("'", "''") + "'" for name in names)
             where = f"relative_path = '{directory}/' AND _display_name IN ({literals})"
-            return ("query", projection, where)
+            return ("query", kind, projection, where)
 
         names = {PurePosixPath(path).name: (path, target // SECOND) for path, target in files}
         normal = [name for name in names if "\n" not in name and "\r" not in name]
@@ -326,7 +345,8 @@ class Adb:
             try:
                 if isinstance(result, RuntimeError):
                     raise result
-                if self.scan_needs_query(result) and path not in confirmed:
+                needs_query = self.scan_needs_query(result)
+                if (needs_query or kind == "videos" and result.strip() != "hidden") and path not in confirmed:
                     raise RuntimeError("MediaStore ainda não mostra a data esperada.")
             except RuntimeError as error:
                 outcomes.append(error)
@@ -340,11 +360,11 @@ class Adb:
             raise RuntimeError(f"Resposta inesperada de Gallery: {response.strip()!r}")
 
 
-def inventory(adb, dates):
-    print("Listando JPEGs no aparelho...", file=sys.stderr, flush=True)
+def inventory(adb, dates, media="all"):
+    print("Listando mídias no aparelho...", file=sys.stderr, flush=True)
     files = defaultdict(list)
-    for path in adb.files():
-        files[jpeg_name(path)].append(path)
+    for path in adb.files(media):
+        files[PurePosixPath(path).name.casefold()].append(path)
     matches = []
     candidates = []
     for filename, paths in files.items():
@@ -486,10 +506,10 @@ def prepare_rollback(journal, record, current):
 def process_batch(adb, journal, jobs, records, rollback, on_error):
     allowed = []
     for path, row in jobs:
-        if allowed_path(path):
+        if path_media(path):
             allowed.append((path, row))
         else:
-            on_error(path, "Caminho do journal fora das pastas JPEG permitidas.")
+            on_error(path, "Caminho do journal fora das pastas de mídia permitidas.")
     stats = adb.batch([shlex.join(("toybox", "stat", "-c", STAT_FORMAT, path)) for path, _ in allowed])
     touches = []
     verified = []
@@ -547,10 +567,10 @@ def process_batch(adb, journal, jobs, records, rollback, on_error):
         journal.executemany(f"UPDATE changes SET status = '{status}' WHERE path = ?", completed)
 
 
-def mutate(adb, journal, matches, limit, rollback):
+def mutate(adb, journal, matches, limit, rollback, media):
     records = {row[0]: row for row in journal.execute(
         "SELECT path, identity, original, target, status FROM changes ORDER BY rowid DESC"
-    )}
+    ) if media == "all" or path_media(row[0]) == media}
     errors = 0
     if rollback:
         jobs = [(path, record) for path, record in records.items() if record[4] != "restored"]
@@ -608,6 +628,8 @@ def main(argv=None):
     parser.add_argument("--db", type=Path, help="Caminho para msgstore.db")
     parser.add_argument("--adb", required=True, help="Caminho para adb.exe")
     parser.add_argument("--serial", help="Serial mostrado por adb devices")
+    parser.add_argument("--media", choices=("all", "images", "videos"), default="all",
+                        help="Seleciona fotos, vídeos ou ambos (padrão: all)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="Aplica as datas do WhatsApp")
     mode.add_argument("--rollback", action="store_true", help="Restaura as datas registradas no journal")
@@ -627,10 +649,10 @@ def main(argv=None):
         if args.apply and (journal_path == args.db.resolve() or
                            (journal_path.exists() and journal_path.samefile(args.db))):
             raise RuntimeError("Use um arquivo de journal separado do banco do WhatsApp.")
-        dates = {} if args.rollback else read_dates(args.db)
+        dates = {} if args.rollback else read_dates(args.db, args.media)
         adb = Adb(args.adb, args.serial)
         if not (args.apply or args.rollback):
-            matches = inventory(adb, dates)
+            matches = inventory(adb, dates, args.media)
             timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
             preview(matches, dates, args.report or Path(f"whatsapp-dates-{timestamp}.csv"))
             return int(any(row.status == "stat_error" for row in matches))
@@ -640,8 +662,8 @@ def main(argv=None):
         )) as journal:
             journal.execute("PRAGMA synchronous = FULL")
             initialize_journal(journal, adb.serial, args.apply)
-            matches = [] if args.rollback else inventory(adb, dates)
-            failed = mutate(adb, journal, matches, args.limit, args.rollback)
+            matches = [] if args.rollback else inventory(adb, dates, args.media)
+            failed = mutate(adb, journal, matches, args.limit, args.rollback, args.media)
             return int(failed or any(row.status == "stat_error" for row in matches))
     except KeyboardInterrupt:
         print("Interrompido. Use o mesmo journal para retomar ou fazer rollback.", file=sys.stderr)

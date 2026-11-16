@@ -2,9 +2,9 @@
 
 [English](../README.md)
 
-Se as fotos do WhatsApp ficaram com a data da cópia ou da restauração, esta ferramenta para Windows ajuda a recuperar a ordem das mensagens na galeria. Ela associa os nomes dos JPEGs no Android às datas das mensagens em um banco WhatsApp já descriptografado. Em seguida, pode ajustar a data de modificação das imagens e atualizar o índice das fotos visíveis.
+Se as fotos e os vídeos do WhatsApp ficaram com a data da cópia ou da restauração, esta ferramenta para Windows ajuda a recuperar a ordem das mensagens na galeria. Ela associa os nomes dos arquivos JPEG, MP4 e MOV às datas das mensagens em um banco WhatsApp já descriptografado. Em seguida, pode ajustar a data de modificação e atualizar o índice da mídia visível.
 
-A data da mensagem pode ser diferente da data em que a foto foi tirada. A ferramenta funciona localmente, mantém intactos o conteúdo JPEG, o EXIF e os marcadores `.nomedia`, e pula arquivos com nomes duplicados ou datas conflitantes.
+A data da mensagem pode ser diferente da data em que a mídia foi gravada. A ferramenta funciona localmente, mantém intactos o conteúdo dos arquivos, os metadados internos e os marcadores `.nomedia`, e pula arquivos com nomes duplicados ou datas conflitantes.
 
 ## O que você precisa
 
@@ -28,15 +28,15 @@ Se aparecer **Allow USB debugging** no celular, aceite. O aparelho deve aparecer
 py -3.12 .\whatsapp_dates.py --db $db --adb $adb
 ```
 
-A prévia não altera o celular. Ela mostra os arquivos encontrados, os ajustes a fazer e as exclusões. Também grava um CSV local com caminhos e datas em UTC. Você pode escolher um arquivo novo com `--report 'C:\caminho\para\previa.csv'`.
+A prévia não altera o celular. Ela mostra os arquivos encontrados, os ajustes a fazer e as exclusões. Também grava um CSV local com caminhos e datas em UTC. Você pode escolher um arquivo novo com `--report 'C:\caminho\para\previa.csv'`. Por padrão, a prévia, a aplicação e o rollback incluem fotos e vídeos. Adicione `--media images` para somente fotos ou `--media videos` para somente vídeos.
 
-## 2. Teste em até três fotos
+## 2. Teste em até três arquivos
 
 ```powershell
 py -3.12 .\whatsapp_dates.py --db $db --adb $adb --apply --limit 3
 ```
 
-Anote os arquivos exibidos. O comando verifica o horário gravado e encerra a **Gallery** ao final se houve reindexação de mídias visíveis. Abra a Gallery e confira a posição das fotos. Se rodar a prévia de novo, os arquivos ajustados devem aparecer como `unchanged`.
+Anote os arquivos exibidos. O comando verifica o horário gravado e encerra a **Gallery** ao final se houve reindexação de mídias visíveis. Abra a Gallery e confira a posição dos arquivos. Se rodar a prévia de novo, os arquivos ajustados devem aparecer como `unchanged`.
 
 ## 3. Aplique à coleção
 
@@ -58,12 +58,13 @@ O rollback restaura as datas de modificação de todos os registros ativos no jo
 
 ## Escopo e privacidade
 
-- A busca inclui JPEGs em `WhatsApp Images`, `Private` e `Sent`. Em `Private` e `Sent`, a ferramenta só altera a data de modificação. A reindexação explícita é restrita às imagens visíveis elegíveis da pasta principal.
+- A busca inclui JPEGs em `WhatsApp Images` e vídeos MP4/MOV em `WhatsApp Video`, incluindo as subpastas `Private` e `Sent` de cada uma. Nessas subpastas a ferramenta só altera a data de modificação. A reindexação explícita é restrita às mídias visíveis elegíveis de cada pasta principal.
 - O auxiliar Android roda temporariamente via ADB para agrupar as chamadas do MediaStore. Ele funciona sem root ou instalação de app. Mantenha o DEX na pasta `android`.
-- Se quiser fazer um backup opcional, escolha um destino local separado e execute:
+- Se quiser fazer um backup opcional, escolha destinos locais separados para fotos e vídeos:
 
   ```powershell
   & $adb pull -a '/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images' 'C:\caminho\backup-das-fotos'
+  & $adb pull -a '/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video' 'C:\caminho\backup-dos-videos'
   ```
 
 - Ao reportar um problema, informe o modelo do aparelho, a versão do Android e o erro com dados pessoais removidos. Mantenha o banco, as fotos, o journal, o CSV e o serial do aparelho em privado.
