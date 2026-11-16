@@ -1,4 +1,4 @@
-from contextlib import closing, nullcontext, redirect_stderr, redirect_stdout
+from contextlib import chdir, closing, nullcontext, redirect_stderr, redirect_stdout
 import csv
 import io
 from pathlib import Path
@@ -44,6 +44,8 @@ class RecoveryTest(unittest.TestCase):
         self.scanned = []
         self.restarts = 0
         self.fail_scan = False
+        self.album = app.REVIEW_ROOT / (app.REVIEW_PREFIX + "test1234")
+        self.digests = {}
         self.enterContext(patch.object(app.subprocess, "run", side_effect=self.mock_adb))
         self.enterContext(patch.object(app.Adb, "media_session", return_value=nullcontext()))
         self.enterContext(patch.object(app.Adb, "media_batch", side_effect=self.mock_media))
@@ -74,6 +76,22 @@ class RecoveryTest(unittest.TestCase):
             words = shlex.split(script)
             if script.startswith("set -e;"):
                 output = "\0".join(self.files) + "\0"
+            elif "sha256sum" in words:
+                path = words[4]
+                output = stat_line(path) + f"{self.digests.get(path, '00' * 32)}  -\n" + stat_line(path)
+            elif "cp" in words:
+                offset = words.index("cp")
+                source, destination = words[offset + 3:offset + 5]
+                self.files[destination] = self.files[source]
+                output = stat_line(destination)
+            elif "mv" in words:
+                offset = words.index("mv")
+                source, destination = words[offset + 2:offset + 4]
+                manifest = Path(f"{self.album.name}-movimentos.csv")
+                with manifest.open(encoding="utf-8-sig", newline="") as handle:
+                    self.assertIn([source, destination], list(csv.reader(handle)))
+                self.files[destination] = self.files.pop(source)
+                output = stat_line(destination)
             elif words[:2] == ["toybox", "stat"]:
                 output = "".join(stat_line(path) for path in words[4:])
             elif "touch" in words:
@@ -85,6 +103,10 @@ class RecoveryTest(unittest.TestCase):
                 output = stat_line(path)
             elif words[:2] == ["am", "force-stop"]:
                 self.restarts += 1
+            elif words[0] == "mktemp":
+                output = str(self.album)
+            elif words[0] == "mkdir":
+                self.assertEqual(words[-1], str(app.REVIEW_ROOT))
             else:
                 self.fail(f"Unexpected command: {script}")
         return subprocess.CompletedProcess(command, 0, output.encode(), b"")
@@ -93,17 +115,20 @@ class RecoveryTest(unittest.TestCase):
         results = []
         for kind, *fields in commands:
             if kind == "scan":
-                self.assertIn(fields, ([self.visible], [self.video]))
+                self.assertTrue(fields[0] in (self.visible, self.video) or app.PurePosixPath(fields[0]).parent == self.album)
                 self.scanned.append(fields[0])
                 results.append("Result: Bundle[{android.intent.extra.STREAM=Supplier{VAL_PARCELABLE@64+136}}]")
             else:
                 media, _, where = fields
-                path = {"images": self.visible, "videos": self.video}[media]
-                filename = Path(path).name
-                self.assertIn(f"'{filename}'", where)
-                expected = self.files[path] // app.SECOND
-                results.append(f"Row: 0 _display_name={filename}, date_modified={expected - self.fail_scan}\r\n"
-                               "Row: 1 _display_name=other.jpg, date_modified=0")
+                if self.album.name in where:
+                    paths = [path for path in self.files if app.PurePosixPath(path).parent == self.album
+                             and f"'{Path(path).name}'" in where]
+                else:
+                    paths = [{"images": self.visible, "videos": self.video}[media]]
+                rows = [f"Row: {index} _display_name={Path(path).name}, "
+                        f"date_modified={self.files[path] // app.SECOND - self.fail_scan}"
+                        for index, path in enumerate(paths)]
+                results.append("\r\n".join(rows + ["Row: 9 _display_name=other.jpg, date_modified=0"]))
         return results
 
     def cli(self, *args):
@@ -170,6 +195,35 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.files[self.hidden], adjusted)
         self.assertEqual(self.files[self.video], adjusted)
         self.assertEqual(self.files[hidden_video], adjusted)
+
+    def test_hash_recovers_exact_content_and_album_keeps_originals(self):
+        extra = str(app.BASE / "extra.jpg")
+        conflict = str(app.BASE / "conflict.jpg")
+        hidden = str(app.BASE / "Sent" / "DUP.JPG")
+        self.digests.update({extra: "aa" * 32, conflict: "bb" * 32})
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("ALTER TABLE message_media ADD COLUMN file_hash TEXT")
+            db.execute("UPDATE message_media SET file_hash = ? WHERE lower(media_name) = 'conflict.jpg'", ("bb" * 32,))
+            db.execute("INSERT INTO message_media VALUES (1, NULL, 'previous-name.jpg', NULL, ?)", ("aa" * 32,))
+        report = self.folder / "hash.csv"
+        self.assertEqual(self.cli("--report", str(report)), 0)
+        with report.open(encoding="utf-8-sig", newline="") as source:
+            statuses = {row["device_path"]: row for row in csv.DictReader(source)}
+        self.assertEqual(statuses[extra]["status"], "needs_change")
+        self.assertEqual(statuses[conflict]["status"], "conflict")
+        self.assertIn(" | ", statuses[conflict]["candidate_message_utc"])
+        originals = self.files.copy()
+        self.assertEqual(self.cli("--review-album"), 0)
+        self.assertEqual({path: self.files[path] for path in originals}, originals)
+        self.assertIn(str(self.album / "conflict.jpg"), self.files)
+        self.assertNotIn(str(self.album / "extra.jpg"), self.files)
+        self.assertNotIn(str(self.album / app.PurePosixPath(hidden).name), self.files)
+        self.album = app.REVIEW_ROOT / (app.REVIEW_PREFIX + "move1234")
+        with chdir(self.folder):
+            self.assertEqual(self.cli("--review-album", "--move", "--media", "images"), 0)
+        self.assertNotIn(conflict, self.files)
+        self.assertEqual(self.files[str(self.album / "conflict.jpg")], originals[conflict])
+        self.assertEqual(self.files[hidden], originals[hidden])
 
 
 if __name__ == "__main__":

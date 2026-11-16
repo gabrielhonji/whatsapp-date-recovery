@@ -56,6 +56,18 @@ py -3.12 .\whatsapp_dates.py --adb $adb --rollback
 
 O rollback restaura as datas de modificação de todos os registros ativos no journal selecionado. Se você só fez o teste inicial, isso corresponde a até três arquivos. Use o mesmo `--journal` caso tenha escolhido um caminho personalizado. O journal contém datas e dados da operação, por isso não permite recuperar o conteúdo dos arquivos.
 
+## Revise os arquivos pendentes na Gallery
+
+Quando o banco contém hashes de mídia, a ferramenta confere os arquivos pendentes por SHA-256. O CSV da prévia mostra as datas candidatas conhecidas para os conflitos. Os arquivos que continuam sem data confiável podem ser reunidos num álbum **WhatsApp Date Review-…**, em **Gallery → Albums**:
+
+```powershell
+py -3.12 .\whatsapp_dates.py --db $db --adb $adb --review-album --media images
+```
+
+Esse comando cria cópias. Para mover os originais, acrescente `--move`. O WhatsApp pode deixar de encontrar as mídias movidas nas conversas. Antes de mover cada grupo, a ferramenta grava um CSV local com os caminhos planejados de origem e destino. Guarde esse mapa caso precise devolver os arquivos manualmente. O rollback de datas não move os arquivos de volta.
+
+Para incluir vídeos, omita `--media images`. Mídias ocultas só entram com `--include-hidden`, que faz com que as mídias transferidas apareçam na Gallery. Entradas sem arquivo no aparelho ficam apenas na prévia.
+
 ## Escopo e privacidade
 
 - A busca inclui JPEGs em `WhatsApp Images` e vídeos MP4/MOV em `WhatsApp Video`, incluindo as subpastas `Private` e `Sent` de cada uma. Nessas subpastas a ferramenta só altera a data de modificação. A reindexação explícita é restrita às mídias visíveis elegíveis de cada pasta principal.

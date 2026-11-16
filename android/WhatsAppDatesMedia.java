@@ -54,7 +54,9 @@ public final class WhatsAppDatesMedia {
         if (fields[0].equals("scan") && fields.length == 2) {
             File media = new File(decode(fields[1]));
             File parent = media.getParentFile();
-            if ((!BASE.equals(parent) && !VIDEOS.equals(parent)) || media.getName().startsWith(".")
+            boolean reviewAlbum = parent != null && new File("/sdcard/Pictures").equals(parent.getParentFile())
+                && parent.getName().matches("WhatsApp Date Review-[A-Za-z0-9]{8}");
+            if ((!BASE.equals(parent) && !VIDEOS.equals(parent) && !reviewAlbum) || media.getName().startsWith(".")
                 || !media.isFile() || Files.isSymbolicLink(media.toPath())) {
                 throw new IllegalArgumentException("Invalid visible media");
             }
